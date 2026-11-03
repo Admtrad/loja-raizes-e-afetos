@@ -2,6 +2,8 @@
 
 Repositório: https://github.com/Admtrad/loja-raizes-e-afetos
 
+Para hospedar em Workers + D1 + R2, consulte [CLOUDFLARE.md](CLOUDFLARE.md). Essa versão tem servidor próprio em `cloudflare/worker.js`; o servidor Python abaixo continua disponível para uso local.
+
 Primeira versão local de uma loja de plantas ornamentais. Python 3.11 ou superior, sem pacotes adicionais.
 
 ## Executar no Windows
