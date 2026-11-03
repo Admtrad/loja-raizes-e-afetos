@@ -1,5 +1,16 @@
 # Hospedar a loja na Cloudflare
 
+Publicação inicial realizada em 03/11/2026:
+
+- Loja: https://loja-raizes-e-afetos.loja-raizes-e-afetos.workers.dev
+- Painel: https://loja-raizes-e-afetos.loja-raizes-e-afetos.workers.dev/admin
+- D1 `raizes-afetos-db` e R2 privado `raizes-afetos-fotos` criados e vinculados.
+- Senha administrativa armazenada como segredo `ADMIN_PASSWORD`, sem valor neste repositório.
+
+O subdomínio workers.dev é independente do domínio e do sistema anterior. Os dados locais não foram importados.
+
+Na verificação imediatamente após a primeira publicação, o endpoint retornou falha de negociação TLS (`ERR_SSL_VERSION_OR_CIPHER_MISMATCH`). A implantação foi confirmada pela API, mas o acesso HTTPS externo ainda precisa ser verificado após a ativação do endereço/certificado. Não desative a validação HTTPS nem altere as configurações do domínio existente para contornar essa pendência.
+
 Use a conta Cloudflare existente. Este projeto cria recursos exclusivos: Worker `loja-raizes-e-afetos`, D1 `raizes-afetos-db` e bucket R2 privado `raizes-afetos-fotos`. Nenhuma zona DNS ou aplicação existente precisa ser alterada. As franquias e cobranças podem ser compartilhadas com outros projetos da conta.
 
 ## Antes de publicar
