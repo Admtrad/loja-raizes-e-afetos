@@ -56,4 +56,45 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError): self.request('/api/orders',payload)
         with server.connect() as db: self.assertEqual(db.execute('SELECT COUNT(*) FROM orders').fetchone()[0],0)
 
+    def individual(self):
+        with server.connect() as db:
+            db.execute('UPDATE products SET individual=1,stock=0 WHERE id=1')
+            db.execute("INSERT INTO specimens(product_id,code,image) VALUES (1,'MON-001','https://example.com/one.jpg')")
+            db.execute("INSERT INTO specimens(product_id,code,image) VALUES (1,'MON-002','https://example.com/two.jpg')")
+        payload=self.order(1);payload['items'][0]['specimen_id']=1
+        return payload
+
+    def test_individual_selection_required_and_cannot_sell_twice(self):
+        payload=self.individual()
+        with self.assertRaises(urllib.error.HTTPError): self.request('/api/orders',self.order(1))
+        with self.request('/api/orders',payload) as r: self.assertEqual(json.load(r)['total'],2500)
+        with self.assertRaises(urllib.error.HTTPError): self.request('/api/orders',payload)
+        with self.request('/api/products') as r:
+            p=json.load(r)[0];self.assertEqual(p['stock'],1);self.assertEqual(p['specimens'][0]['code'],'MON-002')
+
+    def test_duplicate_specimen_rejected(self):
+        payload=self.individual();payload['items']*=2
+        with self.assertRaises(urllib.error.HTTPError): self.request('/api/orders',payload)
+        with server.connect() as db: self.assertEqual(db.execute('SELECT COUNT(*) FROM orders').fetchone()[0],0)
+
+    def test_cancel_individual_restores_exact_specimen_once(self):
+        with self.request('/api/orders',self.individual()) as r: oid=json.load(r)['id']
+        with self.request('/api/login',{'password':server.PASSWORD}) as r: cookie=r.headers['Set-Cookie'].split(';')[0]
+        for _ in range(2):
+            with self.request('/api/admin/orders',{'id':oid,'status':'Cancelado','payment':'Pendente'},cookie): pass
+        with server.connect() as db:
+            self.assertEqual(db.execute('SELECT available FROM specimens WHERE id=1').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT stock FROM products').fetchone()[0],0)
+
+    def test_upload_requires_authentication_and_rejects_non_image(self):
+        import base64
+        with self.assertRaises(urllib.error.HTTPError) as error: self.request('/api/admin/upload',{'data':'test'})
+        self.assertEqual(error.exception.code,401)
+        with self.request('/api/login',{'password':server.PASSWORD}) as r: cookie=r.headers['Set-Cookie'].split(';')[0]
+        with self.assertRaises(urllib.error.HTTPError): self.request('/api/admin/upload',{'data':base64.b64encode(b'<script>bad</script>').decode()},cookie)
+
+    def test_migration_is_repeatable_and_preserves_products(self):
+        server.initialize();server.initialize()
+        with server.connect() as db: self.assertEqual(db.execute('SELECT COUNT(*) FROM products').fetchone()[0],1)
+
 if __name__=='__main__': unittest.main()

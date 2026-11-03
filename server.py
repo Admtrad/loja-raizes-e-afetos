@@ -1,5 +1,5 @@
 """Loja Raízes e Afetos — servidor local, Python 3.11+, sem dependências."""
-import os, json, sqlite3, secrets, hashlib, hmac, time
+import os, json, sqlite3, secrets, hashlib, hmac, time, re, base64, binascii
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from http.cookies import SimpleCookie
@@ -32,7 +32,12 @@ def initialize():
         CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id), total INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'Recebido', payment TEXT NOT NULL DEFAULT 'Pendente', delivery TEXT NOT NULL, created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS items(order_id INTEGER REFERENCES orders(id), product_id INTEGER REFERENCES products(id), name TEXT, quantity INTEGER, price INTEGER);
         CREATE TABLE IF NOT EXISTS movements(id INTEGER PRIMARY KEY, product_id INTEGER REFERENCES products(id), quantity INTEGER NOT NULL, reason TEXT NOT NULL, created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS specimens(id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id), code TEXT NOT NULL UNIQUE, notes TEXT NOT NULL DEFAULT '', image TEXT NOT NULL, available INTEGER NOT NULL DEFAULT 1);
         ''')
+        if 'individual' not in [r['name'] for r in db.execute('PRAGMA table_info(products)')]:
+            db.execute('ALTER TABLE products ADD COLUMN individual INTEGER NOT NULL DEFAULT 0')
+        if 'specimen_id' not in [r['name'] for r in db.execute('PRAGMA table_info(items)')]:
+            db.execute('ALTER TABLE items ADD COLUMN specimen_id INTEGER REFERENCES specimens(id)')
         for category in ['Interior', 'Exterior', 'Suculentas', 'Vasos e acessórios']:
             db.execute('INSERT OR IGNORE INTO categories(name) VALUES (?)', (category,))
 
@@ -46,23 +51,43 @@ def create_order(payload):
     quantities = {}
     for item in payload.get('items', []):
         pid, qty = int(item['id']), int(item['quantity'])
+        sid = int(item['specimen_id']) if item.get('specimen_id') else None
         if qty < 1 or qty > 999: raise ValueError('Quantidade inválida.')
-        quantities[pid] = quantities.get(pid, 0) + qty
+        key = (pid, sid)
+        quantities[key] = quantities.get(key, 0) + qty
     if not quantities: raise ValueError('O carrinho está vazio.')
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         rows, total = [], 0
-        for pid, qty in quantities.items():
+        for (pid, sid), qty in quantities.items():
             p = db.execute('SELECT * FROM products WHERE id=? AND active=1', (pid,)).fetchone()
-            if not p or p['stock'] < qty: raise ValueError('Um produto está indisponível ou sem estoque suficiente.')
-            rows.append((p, qty)); total += p['price'] * qty
+            if not p: raise ValueError('Produto indisponível.')
+            specimen = None
+            if p['individual']:
+                specimen = db.execute('SELECT * FROM specimens WHERE id=? AND product_id=? AND available=1', (sid,pid)).fetchone()
+                if not specimen or qty != 1: raise ValueError('Escolha um exemplar disponível.')
+            elif sid or p['stock'] < qty: raise ValueError('Estoque insuficiente.')
+            rows.append((p, qty, specimen)); total += p['price'] * qty
         customer = db.execute('INSERT INTO customers(name,phone,address) VALUES (?,?,?)', (name[:150], phone[:40], address[:500])).lastrowid
         oid = db.execute('INSERT INTO orders(customer_id,total,delivery) VALUES (?,?,?)', (customer,total,delivery)).lastrowid
-        for p, qty in rows:
-            db.execute('INSERT INTO items VALUES (?,?,?,?,?)', (oid,p['id'],p['name'],qty,p['price']))
-            db.execute('UPDATE products SET stock=stock-? WHERE id=?', (qty,p['id']))
+        for p, qty, specimen in rows:
+            title = p['name'] + (' · Exemplar ' + specimen['code'] if specimen else '')
+            db.execute('INSERT INTO items(order_id,product_id,name,quantity,price,specimen_id) VALUES (?,?,?,?,?,?)', (oid,p['id'],title,qty,p['price'],specimen['id'] if specimen else None))
+            if specimen: db.execute('UPDATE specimens SET available=0 WHERE id=?', (specimen['id'],))
+            else: db.execute('UPDATE products SET stock=stock-? WHERE id=?', (qty,p['id']))
             db.execute('INSERT INTO movements(product_id,quantity,reason) VALUES (?,?,?)', (p['id'],-qty,f'Pedido #{oid}'))
     return {'id':oid, 'total':total}
+
+def photo_url(value):
+    return not value or value.startswith('https://') or bool(re.fullmatch(r'/uploads/[a-f0-9]{32}\.jpg', value))
+
+def product_rows(db, admin=False):
+    fields = '*' if admin else 'id,name,scientific,category,description,care,price,stock,image,individual'
+    rows = [dict(r) for r in db.execute('SELECT '+fields+' FROM products'+('' if admin else ' WHERE active=1'))]
+    for p in rows:
+        p['specimens'] = [dict(r) for r in db.execute('SELECT * FROM specimens WHERE product_id=?'+('' if admin else ' AND available=1'), (p['id'],))]
+        if p['individual']: p['stock'] = sum(s['available'] for s in p['specimens'])
+    return rows
 
 class Handler(BaseHTTPRequestHandler):
     def respond(self, status, data, cookie=None):
@@ -81,9 +106,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = self.path.split('?')[0]
+        if re.fullmatch(r'/uploads/[a-f0-9]{32}\.jpg', route):
+            file = DB.parent / 'uploads' / route.rsplit('/',1)[1]
+            if not file.is_file(): return self.respond(404, {'error':'Foto não encontrada.'})
+            self.send_response(200); self.send_header('Content-Type','image/jpeg'); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers(); self.wfile.write(file.read_bytes()); return
         if route.startswith('/api/admin/') and not self.authorized(): return self.respond(401, {'error':'Entre no painel.'})
         with connect() as db:
-            if route == '/api/products': return self.respond(200,[dict(r) for r in db.execute('SELECT id,name,scientific,category,description,care,price,stock,image FROM products WHERE active=1')])
+            if route == '/api/products': return self.respond(200,product_rows(db))
+            if route == '/api/admin/products': return self.respond(200,product_rows(db, True))
             if route == '/api/categories': return self.respond(200,[dict(r) for r in db.execute('SELECT * FROM categories')])
             tables = {'/api/admin/products':'SELECT * FROM products', '/api/admin/customers':'SELECT * FROM customers ORDER BY id DESC', '/api/admin/orders':'SELECT o.*,c.name,c.phone,c.address FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id DESC', '/api/admin/movements':'SELECT m.*,p.name FROM movements m JOIN products p ON p.id=m.product_id ORDER BY m.id DESC'}
             if route in tables:
@@ -105,7 +135,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(403,{'error':'Origem não autorizada.'})
         try:
             size = int(self.headers.get('Content-Length','0'))
-            if size > 64000: raise ValueError('Requisição muito grande.')
+            if size > (8000000 if self.path == '/api/admin/upload' else 64000): raise ValueError('Requisição muito grande.')
             p = json.loads(self.rfile.read(size))
             if self.path == '/api/login':
                 if not PASSWORD or not hmac.compare_digest(hashlib.sha256(str(p.get('password','')).encode()).digest(),hashlib.sha256(PASSWORD.encode()).digest()):
@@ -119,8 +149,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200,{'ok':True},'session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
             if self.path == '/api/orders': return self.respond(201,create_order(p))
             if not self.authorized(): return self.respond(401,{'error':'Entre no painel.'})
+            if self.path == '/api/admin/upload':
+                raw = base64.b64decode(p['data'], validate=True)
+                if len(raw)>5000000 or not raw.startswith(b'\xff\xd8\xff') or not raw.endswith(b'\xff\xd9'): raise ValueError('Envie uma foto JPEG de até 5 MB.')
+                folder=DB.parent/'uploads'; folder.mkdir(parents=True,exist_ok=True)
+                filename=secrets.token_hex(16)+'.jpg'; (folder/filename).write_bytes(raw)
+                return self.respond(201,{'url':'/uploads/'+filename})
             with connect() as db:
-                if self.path == '/api/admin/categories':
+                db.execute('BEGIN IMMEDIATE')
+                if self.path == '/api/admin/specimens':
+                    pid=int(p['product_id']); code=str(p['code']).strip()[:80]; image=str(p['image'])
+                    product=db.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone()
+                    if not product or not product['individual'] or not code or not image or not photo_url(image): raise ValueError('Informe código e foto real do exemplar.')
+                    available=int(bool(p.get('available',True)))
+                    if p.get('id'):
+                        old=db.execute('SELECT * FROM specimens WHERE id=? AND product_id=?',(int(p['id']),pid)).fetchone()
+                        if not old: raise ValueError('Exemplar não encontrado.')
+                        if db.execute("SELECT 1 FROM items i JOIN orders o ON o.id=i.order_id WHERE i.specimen_id=? AND o.status!='Cancelado'",(old['id'],)).fetchone(): raise ValueError('Exemplar vinculado a pedido não pode ser alterado.')
+                        db.execute('UPDATE specimens SET code=?,notes=?,image=?,available=? WHERE id=?',(code,str(p.get('notes',''))[:1000],image,available,old['id']))
+                        delta=available-old['available']
+                    else:
+                        db.execute('INSERT INTO specimens(product_id,code,notes,image,available) VALUES (?,?,?,?,?)',(pid,code,str(p.get('notes',''))[:1000],image,available)); delta=available
+                    if delta: db.execute('INSERT INTO movements(product_id,quantity,reason) VALUES (?,?,?)',(pid,delta,'Exemplar '+code))
+                elif self.path == '/api/admin/categories':
                     name = str(p.get('name','')).strip()[:80]
                     if not name: raise ValueError('Informe o nome da categoria.')
                     db.execute('INSERT INTO categories(name) VALUES (?)',(name,))
@@ -128,16 +179,20 @@ class Handler(BaseHTTPRequestHandler):
                     name, category = str(p.get('name','')).strip(),str(p.get('category',''))
                     price,cost,stock = int(p['price']),int(p['cost']),int(p['stock'])
                     image=str(p.get('image','')).strip()
-                    if not name or min(price,cost,stock)<0 or (image and not image.startswith('https://')): raise ValueError('Confira os dados do produto e use uma foto HTTPS.')
+                    if not name or min(price,cost,stock)<0 or not photo_url(image): raise ValueError('Confira os dados e a foto.')
                     if not db.execute('SELECT 1 FROM categories WHERE name=?',(category,)).fetchone(): raise ValueError('Categoria inválida.')
                     values=(name[:150],str(p.get('scientific',''))[:150],category,str(p.get('description',''))[:2000],str(p.get('care',''))[:2000],price,cost,stock,image,int(bool(p.get('active',True))))
                     if p.get('id'):
-                        old=db.execute('SELECT stock FROM products WHERE id=?',(int(p['id']),)).fetchone()
+                        old=db.execute('SELECT * FROM products WHERE id=?',(int(p['id']),)).fetchone()
                         if not old: raise ValueError('Produto não encontrado.')
+                        if old['individual'] != int(bool(p.get('individual',False))): raise ValueError('O tipo de estoque não pode ser alterado após o cadastro. Cadastre outro produto.')
+                        if old['individual']: values=values[:7]+(0,)+values[8:]
                         db.execute('UPDATE products SET name=?,scientific=?,category=?,description=?,care=?,price=?,cost=?,stock=?,image=?,active=? WHERE id=?',values+(int(p['id']),))
-                        pid=int(p['id']); delta=stock-old['stock']
+                        pid=int(p['id']); delta=0 if old['individual'] else stock-old['stock']
                     else:
                         pid=db.execute('INSERT INTO products(name,scientific,category,description,care,price,cost,stock,image,active) VALUES (?,?,?,?,?,?,?,?,?,?)',values).lastrowid; delta=stock
+                        if p.get('individual'):
+                            db.execute('UPDATE products SET individual=1,stock=0 WHERE id=?',(pid,)); delta=0
                     if delta: db.execute('INSERT INTO movements(product_id,quantity,reason) VALUES (?,?,?)',(pid,delta,'Cadastro / ajuste manual'))
                 elif self.path == '/api/admin/orders':
                     status,payment=p.get('status'),p.get('payment')
@@ -147,12 +202,13 @@ class Handler(BaseHTTPRequestHandler):
                     if order['status']=='Cancelado' and status!='Cancelado': raise ValueError('Pedido cancelado não pode ser reaberto.')
                     if status=='Cancelado' and order['status']!='Cancelado':
                         for item in db.execute('SELECT * FROM items WHERE order_id=?',(p['id'],)).fetchall():
-                            db.execute('UPDATE products SET stock=stock+? WHERE id=?',(item['quantity'],item['product_id']))
+                            if item['specimen_id']: db.execute('UPDATE specimens SET available=1 WHERE id=?',(item['specimen_id'],))
+                            else: db.execute('UPDATE products SET stock=stock+? WHERE id=?',(item['quantity'],item['product_id']))
                             db.execute('INSERT INTO movements(product_id,quantity,reason) VALUES (?,?,?)',(item['product_id'],item['quantity'],f"Cancelamento #{p['id']}"))
                     db.execute('UPDATE orders SET status=?,payment=? WHERE id=?',(status,payment,p['id']))
                 else: return self.respond(404,{'error':'Rota não encontrada.'})
             return self.respond(200,{'ok':True})
-        except (ValueError,KeyError,TypeError,sqlite3.IntegrityError): self.respond(400,{'error':'Dados inválidos, duplicados ou estoque insuficiente. Confira os campos.'})
+        except (ValueError,KeyError,TypeError,binascii.Error,sqlite3.IntegrityError) as error: self.respond(400,{'error':str(error) if isinstance(error,ValueError) else 'Dados inválidos ou duplicados. Confira os campos.'})
 
 if __name__ == '__main__':
     if len(PASSWORD)<12: raise SystemExit('Defina ADMIN_PASSWORD com pelo menos 12 caracteres antes de iniciar.')

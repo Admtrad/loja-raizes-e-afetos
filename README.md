@@ -26,6 +26,16 @@ O catálogo oferece busca, categorias, detalhes e sacola. O pedido registra os d
 
 ## Dados e limites desta versão
 
+### Produtos com exemplares únicos
+
+No cadastro de um novo produto, selecione **Exemplares identificados individualmente** em **Controle de estoque**. Salve o produto e clique em **Editar** na lista para abrir a seção **Exemplares**. Cadastre um código único (por exemplo, MON-001), características e a foto real de cada unidade. O preço, a categoria e a descrição continuam no produto principal. O estoque passa a ser calculado pelos exemplares disponíveis. O tipo de controle fica fixo após criar o produto para preservar o histórico; os produtos anteriores continuam com estoque por quantidade.
+
+A foto do produto principal é identificada como foto padronizada. Na loja, **Escolher exemplar** mostra as fotos reais e o código de cada unidade disponível; o código também aparece na sacola e no pedido. Colocar na sacola não reserva a planta: a reserva acontece ao registrar o pedido. Dois clientes não podem comprar a mesma unidade. Cancelar libera exatamente o exemplar escolhido, uma única vez.
+
+O cadastro oferece **Tirar foto** e **Escolher da galeria**, tanto para a foto padronizada quanto para a foto real. No computador, esses controles podem abrir o seletor de arquivos; a abertura direta da câmera depende do navegador/celular. A imagem é redimensionada para até 1.600 pixels e convertida para JPEG antes do envio. Arquivos incompatíveis (incluindo alguns HEIC) precisam ser convertidos para JPEG/PNG. As fotos ficam em `data/uploads`, fora do GitHub, e devem acompanhar o backup do banco. Fotos enviadas sem salvar o cadastro podem permanecer sem vínculo.
+
+O layout se adapta a celular e desktop, mas o endereço `127.0.0.1` só funciona no computador que executa a aplicação. Para usar no celular, será necessário disponibilizar a loja em hospedagem HTTPS; esta atualização não abre acesso à rede nem publica o painel. Banco e fotos precisam de armazenamento persistente na hospedagem.
+
 Os registros ficam em `data/store.sqlite3`, fora do Git. GitHub guarda o código, não sincroniza o banco de clientes e pedidos. Para backup, pare o servidor e copie a pasta `data` para armazenamento privado. Para restaurar, pare o servidor e substitua essa pasta pela cópia. Não envie banco de dados, senhas ou dados de clientes ao repositório.
 
 Esta versão é local, com um único acesso administrativo. Não a exponha diretamente à internet. Uma operação pública exige hospedagem com HTTPS, banco persistente com backups, proteção contra abuso, recuperação de acesso, configuração das regiões/taxas de entrega e revisão das informações comerciais e de privacidade. Ainda não existem cobrança online, notificações, frete calculado ou login de clientes. Pagamento e entrega são combinados manualmente; o site informa isso antes de registrar o pedido. Alterar o pagamento para "Reembolsado" registra o controle e não transfere dinheiro.
