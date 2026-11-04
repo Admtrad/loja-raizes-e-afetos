@@ -38,6 +38,9 @@ def initialize():
             db.execute('ALTER TABLE products ADD COLUMN individual INTEGER NOT NULL DEFAULT 0')
         if 'specimen_id' not in [r['name'] for r in db.execute('PRAGMA table_info(items)')]:
             db.execute('ALTER TABLE items ADD COLUMN specimen_id INTEGER REFERENCES specimens(id)')
+        if 'images' not in [r['name'] for r in db.execute('PRAGMA table_info(products)')]:
+            migration = ROOT / 'cloudflare/migrations/0002_product_photos.sql'
+            db.executescript('BEGIN IMMEDIATE;\n' + migration.read_text(encoding='utf-8') + '\nCOMMIT;')
         for category in ['Interior', 'Exterior', 'Suculentas', 'Vasos e acessórios']:
             db.execute('INSERT OR IGNORE INTO categories(name) VALUES (?)', (category,))
 
@@ -82,9 +85,10 @@ def photo_url(value):
     return not value or value.startswith('https://') or bool(re.fullmatch(r'/uploads/[a-f0-9]{32}\.jpg', value))
 
 def product_rows(db, admin=False):
-    fields = '*' if admin else 'id,name,scientific,category,description,care,price,stock,image,individual'
+    fields = '*' if admin else 'id,name,scientific,category,description,care,price,stock,image,individual,images'
     rows = [dict(r) for r in db.execute('SELECT '+fields+' FROM products'+('' if admin else ' WHERE active=1'))]
     for p in rows:
+        p['images'] = json.loads(p['images']) or ([p['image']] if p['image'] else [])
         p['specimens'] = [dict(r) for r in db.execute('SELECT * FROM specimens WHERE product_id=?'+('' if admin else ' AND available=1'), (p['id'],))]
         if p['individual']: p['stock'] = sum(s['available'] for s in p['specimens'])
     return rows
@@ -113,6 +117,7 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith('/api/admin/') and not self.authorized(): return self.respond(401, {'error':'Entre no painel.'})
         with connect() as db:
             if route == '/api/products': return self.respond(200,product_rows(db))
+            if route == '/api/admin/settings': return self.respond(200,dict(db.execute('SELECT photo_limit FROM store_settings WHERE id=1').fetchone()))
             if route == '/api/admin/products': return self.respond(200,product_rows(db, True))
             if route == '/api/categories': return self.respond(200,[dict(r) for r in db.execute('SELECT * FROM categories')])
             tables = {'/api/admin/products':'SELECT * FROM products', '/api/admin/customers':'SELECT * FROM customers ORDER BY id DESC', '/api/admin/orders':'SELECT o.*,c.name,c.phone,c.address FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id DESC', '/api/admin/movements':'SELECT m.*,p.name FROM movements m JOIN products p ON p.id=m.product_id ORDER BY m.id DESC'}
@@ -175,22 +180,33 @@ class Handler(BaseHTTPRequestHandler):
                     name = str(p.get('name','')).strip()[:80]
                     if not name: raise ValueError('Informe o nome da categoria.')
                     db.execute('INSERT INTO categories(name) VALUES (?)',(name,))
+                elif self.path == '/api/admin/settings':
+                    limit = p.get('photo_limit')
+                    if type(limit) is not int or not 1 <= limit <= 20:
+                        raise ValueError('Informe um limite inteiro entre 1 e 20.')
+                    db.execute('UPDATE store_settings SET photo_limit=? WHERE id=1', (limit,))
                 elif self.path == '/api/admin/products':
                     name, category = str(p.get('name','')).strip(),str(p.get('category',''))
                     price,cost,stock = int(p['price']),int(p['cost']),int(p['stock'])
-                    image=str(p.get('image','')).strip()
+                    images = p.get('images', [p['image']] if p.get('image') else [])
+                    if not isinstance(images, list) or len(images)>20 or any(
+                        not isinstance(url, str) or not url.strip() or len(url)>2048 or not photo_url(url.strip()) for url in images
+                    ):
+                        raise ValueError('Informe até 20 fotos válidas.')
+                    images = [url.strip() for url in images]
+                    image = images[0] if images else ''
                     if not name or min(price,cost,stock)<0 or not photo_url(image): raise ValueError('Confira os dados e a foto.')
                     if not db.execute('SELECT 1 FROM categories WHERE name=?',(category,)).fetchone(): raise ValueError('Categoria inválida.')
-                    values=(name[:150],str(p.get('scientific',''))[:150],category,str(p.get('description',''))[:2000],str(p.get('care',''))[:2000],price,cost,stock,image,int(bool(p.get('active',True))))
+                    values=(name[:150],str(p.get('scientific',''))[:150],category,str(p.get('description',''))[:2000],str(p.get('care',''))[:2000],price,cost,stock,image,int(bool(p.get('active',True))),json.dumps(images))
                     if p.get('id'):
                         old=db.execute('SELECT * FROM products WHERE id=?',(int(p['id']),)).fetchone()
                         if not old: raise ValueError('Produto não encontrado.')
                         if old['individual'] != int(bool(p.get('individual',False))): raise ValueError('O tipo de estoque não pode ser alterado após o cadastro. Cadastre outro produto.')
                         if old['individual']: values=values[:7]+(0,)+values[8:]
-                        db.execute('UPDATE products SET name=?,scientific=?,category=?,description=?,care=?,price=?,cost=?,stock=?,image=?,active=? WHERE id=?',values+(int(p['id']),))
+                        db.execute('UPDATE products SET name=?,scientific=?,category=?,description=?,care=?,price=?,cost=?,stock=?,image=?,active=?,images=? WHERE id=?',values+(int(p['id']),))
                         pid=int(p['id']); delta=0 if old['individual'] else stock-old['stock']
                     else:
-                        pid=db.execute('INSERT INTO products(name,scientific,category,description,care,price,cost,stock,image,active) VALUES (?,?,?,?,?,?,?,?,?,?)',values).lastrowid; delta=stock
+                        pid=db.execute('INSERT INTO products(name,scientific,category,description,care,price,cost,stock,image,active,images) VALUES (?,?,?,?,?,?,?,?,?,?,?)',values).lastrowid; delta=stock
                         if p.get('individual'):
                             db.execute('UPDATE products SET individual=1,stock=0 WHERE id=?',(pid,)); delta=0
                     if delta: db.execute('INSERT INTO movements(product_id,quantity,reason) VALUES (?,?,?)',(pid,delta,'Cadastro / ajuste manual'))
@@ -208,7 +224,12 @@ class Handler(BaseHTTPRequestHandler):
                     db.execute('UPDATE orders SET status=?,payment=? WHERE id=?',(status,payment,p['id']))
                 else: return self.respond(404,{'error':'Rota não encontrada.'})
             return self.respond(200,{'ok':True})
-        except (ValueError,KeyError,TypeError,binascii.Error,sqlite3.IntegrityError) as error: self.respond(400,{'error':str(error) if isinstance(error,ValueError) else 'Dados inválidos ou duplicados. Confira os campos.'})
+        except sqlite3.IntegrityError as error:
+            message = str(error)
+            if message in ('Limite de fotos por produto excedido.', 'Retire as fotos excedentes dos produtos antes de reduzir o limite.'):
+                return self.respond(409, {'error':message})
+            self.respond(400, {'error':'Dados inválidos ou duplicados. Confira os campos.'})
+        except (ValueError,KeyError,TypeError,binascii.Error) as error: self.respond(400,{'error':str(error) if isinstance(error,ValueError) else 'Dados inválidos ou duplicados. Confira os campos.'})
 
 if __name__ == '__main__':
     if len(PASSWORD)<12: raise SystemExit('Defina ADMIN_PASSWORD com pelo menos 12 caracteres antes de iniciar.')

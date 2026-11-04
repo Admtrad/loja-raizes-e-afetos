@@ -11,5 +11,21 @@ $('#search').addEventListener('input',render);$('#openCart').onclick=()=>{render
 $('#checkout').onsubmit=async e=>{e.preventDefault();const button=$('#checkout button');button.disabled=true;$('#checkoutMessage').textContent='Registrando…';try{const payload=Object.fromEntries(new FormData(e.target));payload.items=cart;const response=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const result=await response.json();if(!response.ok)throw Error(result.error);cart=[];save();await load();renderCart();e.target.reset();$('#checkoutMessage').textContent=`Pedido #${result.id} registrado! Total dos produtos: ${money(result.total)}. Aguarde o contato da equipe para combinar pagamento e recebimento.`}catch(err){$('#checkoutMessage').textContent=err.message;button.disabled=false}};
 load();
 
-function showDetail(p){$('#detailBody').innerHTML=`<h2>${esc(p.name)}</h2><p><i>${esc(p.scientific)}</i></p>${p.image?`<figure><img class="detail-photo" src="${esc(p.image)}" alt="Foto padronizada de ${esc(p.name)}"><figcaption>Foto padronizada · referência do produto</figcaption></figure>`:''}<p>${esc(p.description)}</p><h3>Cuidados e características</h3><p>${esc(p.care||'Consulte a equipe para orientações sobre esta planta.')}</p><strong>${money(p.price)}</strong>${p.individual?`<h3>Escolha o seu exemplar</h3><p>A foto real mostra a unidade que você receberá. A disponibilidade é confirmada ao registrar o pedido.</p><div class="specimen-grid">${p.specimens.map(s=>`<article class="specimen-card"><a href="${esc(s.image)}" target="_blank" rel="noopener"><img src="${esc(s.image)}" alt="Foto real do exemplar ${esc(s.code)}"></a><strong>Exemplar ${esc(s.code)}</strong><p>${esc(s.notes)}</p><p class="muted">Foto real desta unidade</p><button data-select-unit="${s.id}" data-pid="${p.id}">${cart.some(i=>i.specimen_id===s.id)?'Na sacola ✓':'Escolher este exemplar'}</button></article>`).join('')||'<p>Sem exemplares disponíveis no momento.</p>'}</div>`:''}`;if(!$('#detail').open)$('#detail').showModal()}
+function showDetail(p){$('#detailBody').innerHTML=`<h2>${esc(p.name)}</h2><p><i>${esc(p.scientific)}</i></p>${productGallery(p)}<p>${esc(p.description)}</p><h3>Cuidados e características</h3><p>${esc(p.care||'Consulte a equipe para orientações sobre esta planta.')}</p><strong>${money(p.price)}</strong>${p.individual?`<h3>Escolha o seu exemplar</h3><p>A foto real mostra a unidade que você receberá. A disponibilidade é confirmada ao registrar o pedido.</p><div class="specimen-grid">${p.specimens.map(s=>`<article class="specimen-card"><a href="${esc(s.image)}" target="_blank" rel="noopener"><img src="${esc(s.image)}" alt="Foto real do exemplar ${esc(s.code)}"></a><strong>Exemplar ${esc(s.code)}</strong><p>${esc(s.notes)}</p><p class="muted">Foto real desta unidade</p><button data-select-unit="${s.id}" data-pid="${p.id}">${cart.some(i=>i.specimen_id===s.id)?'Na sacola ✓':'Escolher este exemplar'}</button></article>`).join('')||'<p>Sem exemplares disponíveis no momento.</p>'}</div>`:''}`;if(!$('#detail').open)$('#detail').showModal()}
 document.addEventListener('click',e=>{const b=e.target.closest('[data-select-unit]');if(!b)return;const pid=+b.dataset.pid,sid=+b.dataset.selectUnit;if(!cart.some(i=>i.specimen_id===sid))cart.push({id:pid,quantity:1,specimen_id:sid});save();b.textContent='Na sacola ✓'});
+
+function productGallery(product){
+  const images=product.images || (product.image ? [product.image] : []);
+  if (!images.length) return '';
+  const thumbnails=images.length>1? `<div class="gallery-thumbnails">${images.map((url,index)=>`<button type="button" class="outline" data-gallery-photo="${esc(url)}" aria-label="Ver foto ${index+1}" aria-pressed="${index===0}"><img src="${esc(url)}" alt="" loading="lazy"></button>`).join('')}</div>`:'';
+  return `<figure><img class="detail-photo" src="${esc(images[0])}" alt="Foto 1 de ${esc(product.name)}" data-product-name="${esc(product.name)}"><figcaption>Fotos de referência do produto</figcaption>${thumbnails}</figure>`;
+}
+$('#detailBody').addEventListener('click',event=>{
+  const button=event.target.closest('[data-gallery-photo]');
+  if (!button) return;
+  const image=$('#detailBody .detail-photo');
+  image.src=button.dataset.galleryPhoto;
+  const buttons=[...$('#detailBody').querySelectorAll('[data-gallery-photo]')];
+  image.alt=`Foto ${buttons.indexOf(button)+1} de ${image.dataset.productName}`;
+  buttons.forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
+});

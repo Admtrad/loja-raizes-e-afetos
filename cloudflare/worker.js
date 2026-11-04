@@ -37,10 +37,12 @@ async function rateLimit(request, env, kind, limit) {
   return result.count <= limit;
 }
 async function products(env, admin) {
-  const fields = admin ? '*' : 'id,name,scientific,category,description,care,price,stock,image,individual';
+  const fields = admin ? '*' : 'id,name,scientific,category,description,care,price,stock,image,individual,images';
   const rows = await all(env.DB, `SELECT ${fields} FROM products${admin ? '' : ' WHERE active=1'}`);
   const units = await all(env.DB, `SELECT s.* FROM specimens s JOIN products p ON p.id=s.product_id${admin ? '' : ' WHERE s.available=1 AND p.active=1'}`);
   for (const p of rows) {
+    p.images = JSON.parse(p.images);
+    if (!p.images.length && p.image) p.images = [p.image];
     p.specimens = units.filter(s => s.product_id === p.id);
     if (p.individual) p.stock = p.specimens.reduce((sum, s) => sum + s.available, 0);
   }
@@ -76,18 +78,23 @@ async function saveProduct(env, p) {
   const name = text(p.name, 150), category = text(p.category, 80), individual = p.individual ? 1 : 0;
   if (!name || !await statement(env.DB, 'SELECT 1 FROM categories WHERE name=?', category).first()) throw new InputError('Informe nome e categoria.');
   const price = integer(p.price), cost = integer(p.cost), stock = individual ? 0 : integer(p.stock);
-  const values = [name, text(p.scientific, 150), category, text(p.description), text(p.care), price, cost, stock, photo(p.image), p.active ? 1 : 0];
+  const images = p.images === undefined ? [photo(p.image)].filter(Boolean) : p.images;
+  if (!Array.isArray(images) || images.length > 20 || images.some(image => typeof image !== 'string')) {
+    throw new InputError('Informe até 20 fotos válidas.');
+  }
+  const gallery = images.map(image => photo(image, true));
+  const values = [name, text(p.scientific, 150), category, text(p.description), text(p.care), price, cost, stock, gallery[0] || '', p.active ? 1 : 0, JSON.stringify(gallery)];
   if (p.id) {
     const id = integer(p.id, 1), old = await statement(env.DB, 'SELECT * FROM products WHERE id=?', id).first();
     if (!old || old.individual !== individual) throw new InputError('O tipo de estoque não pode ser alterado após o cadastro.');
     await env.DB.batch([
       statement(env.DB, "INSERT INTO movements(product_id,quantity,reason) SELECT id,?-stock,'Ajuste manual' FROM products WHERE id=? AND individual=0 AND stock!=?", stock, id, stock),
-      statement(env.DB, 'UPDATE products SET name=?,scientific=?,category=?,description=?,care=?,price=?,cost=?,stock=?,image=?,active=? WHERE id=?', ...values, id),
+      statement(env.DB, 'UPDATE products SET name=?,scientific=?,category=?,description=?,care=?,price=?,cost=?,stock=?,image=?,active=?,images=? WHERE id=?', ...values, id),
     ]);
   } else {
     // last_insert_rowid is local to the batch; insert movement immediately.
     await env.DB.batch([
-      statement(env.DB, 'INSERT INTO products(name,scientific,category,description,care,price,cost,stock,image,active,individual) VALUES (?,?,?,?,?,?,?,?,?,?,?)', ...values, individual),
+      statement(env.DB, 'INSERT INTO products(name,scientific,category,description,care,price,cost,stock,image,active,images,individual) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', ...values, individual),
       statement(env.DB, "INSERT INTO movements(product_id,quantity,reason) SELECT id,stock,'Cadastro' FROM products WHERE id=last_insert_rowid() AND stock>0"),
     ]);
   }
@@ -134,6 +141,7 @@ async function dispatch(request, env) {
   if (path.startsWith('/api/admin/') && !await authorized(request, env)) return response({error: 'Entre no painel.'}, 401);
   if (request.method === 'GET') {
     if (path === '/api/products') return response(await products(env, false));
+    if (path === '/api/admin/settings') return response(await statement(env.DB, 'SELECT photo_limit FROM store_settings WHERE id=1').first());
     if (path === '/api/admin/products') return response(await products(env, true));
     if (path === '/api/categories') return response(await all(env.DB, 'SELECT * FROM categories'));
     if (path === '/api/admin/customers') return response(await all(env.DB, 'SELECT * FROM customers ORDER BY rowid DESC'));
@@ -201,7 +209,9 @@ async function dispatch(request, env) {
     return response({url: '/uploads/' + key}, 201);
   }
   if (path === '/api/admin/products') await saveProduct(env, p);
-  else if (path === '/api/admin/specimens') await saveSpecimen(env, p);
+  else if (path === '/api/admin/settings') {
+    await statement(env.DB, 'UPDATE store_settings SET photo_limit=? WHERE id=1', integer(p.photo_limit, 1, 20)).run();
+  } else if (path === '/api/admin/specimens') await saveSpecimen(env, p);
   else if (path === '/api/admin/categories') {
     const name = text(p.name, 80); if (!name) throw new InputError('Informe o nome.');
     await statement(env.DB, 'INSERT INTO categories(name) VALUES (?)', name).run();
@@ -217,6 +227,8 @@ export default {
     try { return await dispatch(request, env); }
     catch (error) {
       if (error instanceof InputError) return response({error: error.message}, 400);
+      const photoError = /(?:Limite de fotos por produto excedido|Retire as fotos excedentes dos produtos antes de reduzir o limite)\./.exec(String(error));
+      if (photoError) return response({error: photoError[0]}, 409);
       // Never disclose SQL, credentials or customer information in responses/logs.
       if (/D1_ERROR.*(?:Estoque insuficiente|Exemplar indisponível|preço mudou|Produto indisponível|Pedido cancelado|UNIQUE constraint)/s.test(String(error))) return response({error: 'Registro duplicado, pedido cancelado ou item indisponível. Atualize a página e confira os dados.'}, 409);
       return response({error: 'Não foi possível concluir. Tente novamente ou contate a equipe.'}, 500);

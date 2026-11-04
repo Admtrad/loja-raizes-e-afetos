@@ -19,6 +19,7 @@ function setup() {
       },
     };
   }});
+  sql.exec(readFileSync(new URL('../cloudflare/migrations/0002_product_photos.sql', import.meta.url), 'utf8'));
   const images = new Map();
   const env = {
     ADMIN_PASSWORD: 'senha-local-somente-para-testes',
@@ -103,6 +104,24 @@ test('foto autenticada vai para R2 e é entregue com MIME seguro', async () => {
   assert.equal((await s.request('/uploads/../../server.py')).status, 404);
   s.sql.close();
 });
+test('galeria preserva capa antiga e respeita o limite configurado', async () => {
+  const s = setup();
+  await s.login();
+  await s.product();
+  s.sql.exec("UPDATE products SET image='https://example.com/antiga.jpg' WHERE id=1");
+  const catalog = async () => (await (await s.request('/api/products')).json())[0];
+  assert.deepEqual((await catalog()).images, ['https://example.com/antiga.jpg']);
+  const images = Array.from({length: 5}, (_, i) => `https://example.com/${i}.jpg`);
+  const product = {id: 1, name: 'Planta', category: 'Interior', price: 2500, cost: 1000, stock: 3, active: true, images};
+  assert.equal((await s.request('/api/admin/products', product)).status, 409);
+  assert.equal((await s.request('/api/admin/settings', {photo_limit: 5})).status, 200);
+  assert.equal((await s.request('/api/admin/products', product)).status, 200);
+  assert.deepEqual((await catalog()).images, images);
+  assert.equal((await catalog()).image, images[0]);
+  assert.equal((await s.request('/api/admin/settings', {photo_limit: 4})).status, 409);
+  s.sql.close();
+});
+
 test('limite de login e validação de origem', async () => {
   const s = setup();
   assert.equal((await s.request('/api/login', {}, {headers: {Origin: 'https://outro.example'}})).status, 403);
